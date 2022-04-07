@@ -32,6 +32,7 @@ void NotFound(AsyncWebServerRequest *request) {
 
 void setup() {
   Serial.begin(115200); //set baud rate and pins
+  Serial2.begin(115200, SERIAL_8N1, 13, 12);
   WiFi.softAP(ssid, password);
   
   
@@ -39,7 +40,8 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(IP);
 
-  
+  Serial2.print("AP IP address: ");
+  Serial2.println(IP);
 
   // set root to HTML page
   server.on("/", HTTP_GET, [] (AsyncWebServerRequest *request) {
@@ -49,6 +51,7 @@ void setup() {
   //handle HTTP get requests
   server.on("/get", HTTP_GET, [] (AsyncWebServerRequest *request) {
     Serial.println(buildTransmission(request));
+    Serial2.println(buildTransmission(request));
     returnPage(request); 
   });
   
