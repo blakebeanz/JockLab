@@ -115,8 +115,8 @@ EncoderRight.irq(EncoderHandlerRight,Pin.IRQ_RISING)
 
 def Reverse():
     global PwmLeft,PwmRight,ReverseMode
-    PwmLeft.duty_ns(1430000)
-    PwmRight.duty_ns(1430000)
+    PwmLeft.duty_ns(1480000)
+    PwmRight.duty_ns(1480000)
     time.sleep(1)
     PwmLeft.duty_ns(1500000)
     PwmRight.duty_ns(1500000)
@@ -133,16 +133,15 @@ def Forward():
     
 
 #init UART
-uart = UART(0,9600, bits=8, parity=None, stop=1, tx = Pin(16), rx = Pin(17)) # init with given parameters
+uart = UART(0,115200, bits=8, parity=None, stop=1, tx = Pin(16), rx = Pin(17)) # init with given parameters
 #end init UART
 
 SignalToMotor = 1500000
 signal = ''
 Decoded = ''
-Cycles = 0
 #CF = 0
 #timer before start
-for i in range(3,0,-1):
+for i in range(1,0,-1):
     time.sleep(1)
     print('Starting in {}'.format(i))
 #TestVarsToDelete
@@ -150,6 +149,10 @@ for i in range(3,0,-1):
 #ENDTESTVARS
 #Start Motion Sensor
 ultra()
+#
+InputDistance = 0
+InputVelocity = 0
+Cycles = 0
 
 
 ####################################RuntimeLoop################################
@@ -169,7 +172,7 @@ while True:
     if SSCounter2 > 50 :
         SSCounter1 = 0
         led.value(0)
-        SSafe = True
+        SSsafe = True
     
     if SSDistance != SSDistancePrev:
         print(SSDistance)
@@ -184,53 +187,83 @@ while True:
 #check acceleromater
     DistanceRight = EncoderCountsRight*0.0291 #distance in ft
     DistanceLeft = EncoderCountsLeft*0.0291 #distance in ft
-#print(Distance)
+
     signal = uart.read()
     if signal:
+        InputParam = 1
+        TempDistance = '0'
+        TempTargetVelocity = '0'
+        TempCycles = '0'
         print('Signal is : {}'.format(signal))
-        print(chr(signal[0]))
-        if signal[0] in range(48,57):
-            Cycles = int(chr(signal[0]))
+        for i in range (0,len(signal)):
+            #print(signal[i])
+            if (signal[i] == 45):
+                InputParam = InputParam + 1
+            if (signal[i] in range(48,57)):
+                if InputParam == 1:
+                    TempDistance = TempDistance + chr(signal[i])
+                if InputParam == 2:
+                    TempTargetVelocity = TempTargetVelocity + chr(signal[i])
+                if InputParam == 3:
+                    TempCycles = TempCycles + chr(signal[i])
+        #print('test')
+        Cycles = int(TempCycles)
+        InputDistance = int(TempDistance)
+        InputVelocity = int(TempTargetVelocity)
+        #print('Cycles : {}, Distance : {}, Speed : {}'.format(Cycles,TargetDistance,TargetVelocity))
+
 
     
 #Start Accelerate and decellerate Run
     if Cycles > 0:
+        # STart Going Forward
         if ProcedureState == 0:
-            TargetVelocity = 3 # starts motors
-            TargetDistance = 5 # sets distance
+            print('PS0')
+            Forward()
+            TargetVelocity = InputVelocity # starts motors
+            TargetDistance =  InputDistance #sets distance
             ProcedureState = 1 # next step
             EncoderCountsRight = 0 # reset encoder counts
             EncoderCountsLeft = 0
-            
+            MPHRight = 0
+            MPHLeft = 0
+        # Wait until distance is reached then go into reverse    
         elif ProcedureState == 1:
+            print('PS1')
             if (DistanceLeft >= TargetDistance) and (DistanceRight >= TargetDistance):
-                Reverse()
+                #Reverse()
                 #Brake algorithm here
                 TargetVelocity = 0 # set velocity to 0
-                ProcedureState = 2 # reached distance
-                print('Reached Distance')
-                
+                if ((SignalToMotorLeft in range(1490000,1505000)) and (SignalToMotorRight in range(1490000,1505000))):
+                    ProcedureState = 2 # reached distance
+                    Reverse()
+                    print('Reached Distance')
+        #Set Reverse parameters        
         elif ProcedureState == 2:
+            print('PS2')
             #Reverse() # enter reverse mode
-            TargetVelocity = -3
+            TargetVelocity = -(InputVelocity)
             EncoderCountsRight = 0
             EncoderCountsLeft = 0
             MPHRight = 0
             MPHLeft = 0
             ProcedureState = 3
-            SignalToMotorLeft = 1470000
-            SignalToMotorRight = 1470000
+            #SignalToMotorLeft = 1470000
+            #SignalToMotorRight = 1470000
             print('PS 2')
-            
+        #wait until reverse distance is reached
         elif ProcedureState == 3:
+            print('PS3')
             #print('Right : {} ,Left : {}'.format(SignalToMotorRight,SignalToMotorLeft))
             if (DistanceLeft >= TargetDistance) and (DistanceRight >= TargetDistance):
-                Forward()
-                #Reverse Brake algorithm here
-                Cycles -= 1
-                ProcedureState = 0
                 TargetVelocity = 0
-                print('Initial Position')            
+                if ((SignalToMotorLeft in range(1490000,1510000)) and (SignalToMotorRight in range(1490000,1510000))):
+                #Reverse Brake algorithm here
+                    Cycles -= 1
+                    ProcedureState = 0
+                    MPHRight = 0
+                    MPHLeft = 0
+                    print('Initial Position')            
                   
             
         
@@ -251,16 +284,22 @@ while True:
         #print('ErrorLeft {}'.format(errorLeft))
 
     if MPHRight < abs(TargetVelocity):
+        print('1')
         SignalToMotorRight += int(errorRight*50 + errorRightPrev*24)
         #print('Right+')
     if MPHLeft < abs(TargetVelocity):
+        print('2')
         SignalToMotorLeft += int(errorLeft*52 + errorLeftPrev*27)
         #print('Left+')
-    if TargetVelocity == 0 :
+    if TargetVelocity == 0:
+        SignalToMotorLeft += int(errorLeft*100 + errorLeftPrev*24)
+        SignalToMotorRight += int(errorRight*100 + errorRightPrev*27)
+        """
         SignalToMotorRight = 1500000
         SignalToMotorLeft = 1500000
         MPHRight = 0
         MPHLeft = 0
+        """
     errorRightPrev = errorRight
     errorLeftPrev = errorLeft
 #PID end
@@ -269,12 +308,13 @@ while True:
     PwmRight.duty_ns(SignalToMotorRight)
     PwmLeft.duty_ns(SignalToMotorLeft)
     if ((MPHRight != MPHRightPrev) or (MPHLeft != MPHLeftPrev)):
-        print('Left {}, Right {} PWMLeft {}, PWMRight{}'.format(MPHLeft,MPHRight,PwmRight.duty_ns(),PwmLeft.duty_ns()))
+        print('Left {}, Right {} PWMLeft {}, PWMRight{}'.format(MPHLeft,MPHRight,PwmLeft.duty_ns(),PwmRight.duty_ns()))
     MPHRightPrev = MPHRight
     MPHLeftPrev = MPHLeft
-    #print('Encoders L: {} R: {}'.format(EncoderCountsLeft, EncoderCountsRight))
+    print('Encoders L: {} R: {}'.format(EncoderCountsLeft, EncoderCountsRight))
 #end code
     #print('time elapsed = {}'.format(time.ticks_ms()-start))
     while (time.ticks_ms() < start + 10):
         pass
+
 
