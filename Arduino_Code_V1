@@ -1,0 +1,347 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include "web.h"
+
+// Pin Constants
+const int PWMLeft = 13;
+const int PWMRight = 12;
+const int ENCLeft = 25;
+const int ENCLeftC = 33;
+const int ENCLeftB = 32;
+const int ENCRight = 14;
+const int ENCRightB = 27;
+const int ENCRightC = 26;
+
+//PWM constants
+const int freq = 200;
+const int channel_Left = 0;
+const int channel_Right = 1;
+const int resolution = 16;
+const int Neutral = 19661;
+const int UpperGrey = 19750;
+const int LowerGrey = 19550;
+int StopFactor = 1;
+
+//MISC
+const int LED = 2;
+//Calculation vars
+double Rotations;
+double RPM;
+double MPH;
+unsigned long MPHTimer = 0;
+unsigned long Elapsedms;
+short MPHCounter = 0;
+
+//Global Vars
+double errorLeft;
+double errorRight;
+int SignalToMotorLeft = Neutral;
+int SignalToMotorRight = Neutral;
+int RightEncoderLast = 0;
+int LeftEncoderLast = 0;
+double MPHLeft = 0;
+double MPHRight = 0;
+double RightDisplacement = 0;
+double LeftDisplacement = 0;
+unsigned long Start;
+short State =0;
+int TargetVelocity = 0;
+
+
+//--------------Server Init --------------------
+AsyncWebServer server(80); //port 80 -> constructor: AsyncServer(uint16_t port);
+String input = "";
+bool NewInput = false;
+const char* ssid     = "Jocklab Server";// "ESP32-Access-Point";
+const char* password = "ElijahMoore";
+
+//input parameters to server
+const char* REPETITIONS = "Repetitions";
+const char* DISTANCE = "Distance";
+const char* SPEED = "Speed";
+
+int RepetitionsInput = 0;
+int DistanceInput = 0;
+int SpeedInput = 0;
+
+void NotFound(AsyncWebServerRequest *request) {
+  request->send(404, "text/plain", "Not found");
+}
+/*
+ * -simple HTML web page -> check "ESPAsyncWebServer README.md" 
+ * for more information
+ * -Look at HTTP GET request
+ */
+
+
+//--------------------------------------------------
+
+//--------------PWM TO motor Characteristics -----------------------
+byte lastL = 0;
+byte lastR = 0;
+//ENC Characteristics
+int EncoderCountsLeft = 0;
+int EncoderCountsRight = 0;
+void IRAM_ATTR LeftEncoderHandler(){
+  if (lastL == 1){
+    EncoderCountsLeft ++;
+  } else EncoderCountsLeft --;
+  lastL = 0;
+  //digitalWrite(LED, !digitalRead(LED));
+  
+}
+void IRAM_ATTR LeftEncoderHandlerB(){
+  if (lastL == 2){
+    EncoderCountsLeft ++;
+  } else EncoderCountsLeft --;
+  lastL = 1;
+  //digitalWrite(LED, !digitalRead(LED));
+  
+}
+void IRAM_ATTR LeftEncoderHandlerC(){
+  if (lastL == 0){
+    EncoderCountsLeft ++;
+  } else EncoderCountsLeft --;
+  lastL = 2;
+  //digitalWrite(LED, !digitalRead(LED));
+  
+}
+void IRAM_ATTR RightEncoderHandler(){
+  if (lastR == 1){
+    EncoderCountsRight ++;
+  } else EncoderCountsRight --;
+  lastR = 0;
+}
+void IRAM_ATTR RightEncoderHandlerB(){
+  if (lastR == 2){
+    EncoderCountsRight ++;
+  } else EncoderCountsRight --;
+  lastR = 1;
+  //digitalWrite(LED, !digitalRead(LED));
+}
+void IRAM_ATTR RightEncoderHandlerC(){
+  if (lastR == 0){
+    EncoderCountsRight ++;
+  } else EncoderCountsRight --;
+  lastR = 2;
+  //digitalWrite(LED, !digitalRead(LED));
+}
+
+
+void setup() {
+  Serial.begin(115200); 
+  Serial2.begin(115200);
+  
+  //-------------------- Server Init --------------------------
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+
+  // set root to HTML page
+  server.on("/", HTTP_GET, [] (AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", webpageCode);
+  });
+  
+  //handle HTTP get requests
+    server.on("/get", HTTP_GET, [] (AsyncWebServerRequest *request) {
+    updateValues(request);
+    Serial.println(SpeedInput);
+    Serial.println(DistanceInput);
+    Serial.println(RepetitionsInput);
+    NewInput = true;
+    returnPage(request); 
+  });
+  
+  server.onNotFound(NotFound);
+  server.begin();
+  // --------- END Server Init --------------
+
+  //SETUP LED -----------------
+  pinMode(LED, OUTPUT);
+  
+  //PWM SETUP --------------------------------------------
+  ledcSetup(channel_Left, freq, resolution);
+  ledcSetup(channel_Right, freq, resolution);
+
+  ledcAttachPin(PWMLeft, channel_Left);
+  ledcAttachPin(PWMRight,channel_Right);
+
+  ledcWrite(channel_Left, Neutral);
+  ledcWrite(channel_Right, Neutral);
+  
+  //ENC SETUP ----------------------------
+  pinMode(ENCLeft, INPUT_PULLUP);
+  pinMode(ENCLeftB, INPUT_PULLUP);
+  pinMode(ENCLeftC, INPUT_PULLUP);
+  pinMode(ENCRight, INPUT_PULLUP);
+  pinMode(ENCRightB, INPUT_PULLUP);
+  pinMode(ENCRightC, INPUT_PULLUP);
+  attachInterrupt(ENCLeft, LeftEncoderHandler, RISING);
+  attachInterrupt(ENCLeftB, LeftEncoderHandlerB, RISING);
+  attachInterrupt(ENCLeftC, LeftEncoderHandlerC, RISING);
+  attachInterrupt(ENCRight, RightEncoderHandler, RISING);
+  attachInterrupt(ENCRightB, RightEncoderHandlerB, RISING);
+  attachInterrupt(ENCRightC, RightEncoderHandlerC, RISING);
+
+  
+  delay(5000);
+}
+
+
+//---------------- Infinite Loop ---------------------------------
+void loop() {
+  Start = millis();
+    // -------------- Read input -------------------
+  if (NewInput){
+    Serial.println(input);
+    NewInput = false;
+  }
+  //Debugging Print
+  Serial.print(MPHLeft);
+  Serial.print(" : ");
+  Serial.print(MPHRight);
+  Serial.print(" : ");
+  Serial.print(EncoderCountsLeft);
+  Serial.print(" : ");
+  Serial.print(EncoderCountsRight);
+  Serial.print(" : ");
+  Serial.print(SignalToMotorLeft);
+  Serial.print(" : ");
+  Serial.print(SignalToMotorRight);
+  Serial.print(" : ");
+  Serial.print(LeftDisplacement);
+  Serial.print(" : ");
+  Serial.println(RightDisplacement);
+  
+  // ---------------Calculate MPH and displacement-----------------------
+  if (MPHCounter > 4){
+    //Serial.println("MPH is being calculated");
+    Elapsedms = millis() - MPHTimer;
+    //Serial.println(Elapsedms);
+    Rotations = (EncoderCountsRight-RightEncoderLast);
+    RightDisplacement += (Rotations/108)*1.05;
+    RPM = (Rotations/108)/((double)Elapsedms/1000)*60; //find RPM
+    MPH = (RPM * 1.05)*0.01136; // RPM to MPH
+    MPHRight = MPH;
+    RightEncoderLast = EncoderCountsRight;
+    Rotations = (EncoderCountsLeft - LeftEncoderLast);
+    LeftDisplacement += (Rotations/108)*1.05;
+    RPM = (Rotations/108)/((double)Elapsedms/1000)*60; //find RPM
+    MPH = (RPM * 1.05)*0.01136; // RPM to MPH
+    MPHLeft = MPH;
+    LeftEncoderLast = EncoderCountsLeft;
+    //Serial.println(MPHRight);
+    //Serial.println(MPHLeft);
+    MPHCounter = 0;
+    MPHTimer = millis();
+   } else MPHCounter ++;
+  // -----------------------------------------------------
+  if (RepetitionsInput > 0){
+    if (State == 0){
+      TargetVelocity = SpeedInput;
+      RightDisplacement = 0;
+      LeftDisplacement = 0;
+      State = 1;
+      Serial.println("End State 0");
+    } 
+    else if(State == 1){
+      if ((RightDisplacement > DistanceInput-2)||(LeftDisplacement > DistanceInput-2)){
+        TargetVelocity = -(TargetVelocity);
+        State = 2;
+        Serial.println("End State 1");
+      }
+    }
+    else if(State == 2){
+      if((RightDisplacement < 2)||(LeftDisplacement < 2)){
+        RepetitionsInput --;
+        //TargetVelocity = SpeedInput;
+        State = 0;
+        Serial.println("End State 2");
+      }
+    }
+  } 
+  else{
+    TargetVelocity = 0;
+    State = 0;
+  }
+
+  
+
+  // ---------------SignalToMotor---------------------
+  //Serial.println(MPHLeft);
+  //Serial.println(MPHRight);
+  errorLeft = TargetVelocity - MPHLeft;
+  errorRight = TargetVelocity - MPHRight;
+  if (TargetVelocity < 0){ // Skips Grey area once motors at 0 mph
+    if ((MPHLeft == 0)||(MPHRight == 0)){
+      if ((SignalToMotorLeft > LowerGrey)||(SignalToMotorRight > LowerGrey)){
+        SignalToMotorLeft = LowerGrey; 
+        SignalToMotorRight = LowerGrey;
+      }
+    }
+  }
+  if (TargetVelocity > 0){ // Skips Grey area once motors at 0 mph
+    if ((MPHLeft == 0)||(MPHRight == 0)){
+      if ((SignalToMotorLeft < UpperGrey)||(SignalToMotorRight < UpperGrey)){
+        SignalToMotorLeft = UpperGrey; 
+        SignalToMotorRight = UpperGrey;
+      }
+    }
+  }
+  if (TargetVelocity == 0){
+    
+      SignalToMotorLeft = Neutral;
+      SignalToMotorRight = Neutral;
+  }
+  /*
+  if (TargetVelocity == 0){ //Sets Throttle to Nuetral once motors stop / reach grey area
+  
+    StopFactor = 2;
+    if ((MPHLeft == 0)||(MPHRight == 0)){
+      SignalToMotorLeft = Neutral;
+      SignalToMotorRight = Neutral;
+    }
+  } else {StopFactor = 1;}
+  */
+  /*
+  if (SpeedInput == 3){
+    ledcWrite(channel_Right,20054);
+    ledcWrite(channel_Left,20054);
+  }else {
+    ledcWrite(channel_Right,Neutral);
+    ledcWrite(channel_Left,Neutral);
+  }
+  */
+
+  
+  if (abs(errorLeft) > 0.5){
+    SignalToMotorLeft = SignalToMotorLeft + ((int)(errorLeft)*StopFactor*2);
+  }
+  if (abs(errorRight) > 0.5){
+    SignalToMotorRight = SignalToMotorRight + ((int)(errorRight)*StopFactor*2);
+  }
+  if ((SignalToMotorLeft < 22282)&&(SignalToMotorLeft > 17039)){
+    ledcWrite(channel_Left,SignalToMotorLeft);
+  } else ledcWrite(channel_Left, Neutral);
+  
+  if ((SignalToMotorRight < 22282)&&(SignalToMotorRight > 17039)){
+    ledcWrite(channel_Right,SignalToMotorRight);
+  } else ledcWrite(channel_Right, Neutral);
+  
+  //-----------------------------------------------------------
+
+
+
+  while ((millis()-Start)<20){}
+}
+
+void updateValues(AsyncWebServerRequest *request) {
+  DistanceInput = request->getParam(DISTANCE)->value().toInt();
+  SpeedInput = request->getParam(SPEED)->value().toInt();
+  RepetitionsInput = request->getParam(REPETITIONS)->value().toInt();
+}
+
+void returnPage(AsyncWebServerRequest *request) {
+  request->send(200, "text/html", "Data Successfuly Sent!" "<br><a href=\"/\">Send Another Transmission</a>");
+}
